@@ -8,7 +8,7 @@ on:
         required: true
         default: "https://streamingnow.mov/?play=SW1PWFRUbUcxTWdmNHIvT1RGb0tTaXFRVStiR3NRdkZNcWlrOWtVc2ljYU5nQ1JPeDJwbmhFeTN3VHE3Q0drOGFiSUs0ZU9LUEo1TE9XcEhUTHJLOUt0cGc0aXZvTGhDUDhRV1IyMGR3Qnl4d0YyNERsQWRhOXBvK2tQanNvODBzc3FOQnVDRjl2UUJDVjJURjFqNjNER20="
       cf_clearance:
-        description: "cf_clearance cookie (from browser, leave blank to use FlareSolverr)"
+        description: "cf_clearance cookie (leave blank to use FlareSolverr)"
         required: false
         default: ""
 
@@ -27,9 +27,9 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install curl_cffi requests
+        run: pip install curl_cffi
 
-      - name: Start FlareSolverr (if no cf_clearance provided)
+      - name: Start FlareSolverr
         if: ${{ inputs.cf_clearance == '' }}
         run: |
           docker pull ghcr.io/flaresolverr/flaresolverr:latest
@@ -38,65 +38,112 @@ jobs:
             -p 8191:8191 \
             -e LOG_LEVEL=info \
             ghcr.io/flaresolverr/flaresolverr:latest
-          echo "Waiting for FlareSolverr to be ready..."
+          echo "Waiting for FlareSolverr..."
           for i in $(seq 1 30); do
             if curl -sf http://localhost:8191/health > /dev/null 2>&1; then
-              echo "FlareSolverr ready"
-              break
+              echo "FlareSolverr ready"; break
             fi
             sleep 2
           done
 
-      - name: Run scraper (with FlareSolverr)
+      - name: Test FlareSolverr health
+        if: ${{ inputs.cf_clearance == '' }}
+        run: curl -s http://localhost:8191/health | python3 -m json.tool
+
+      - name: Test FlareSolverr request
+        if: ${{ inputs.cf_clearance == '' }}
+        run: |
+          curl -s -X POST http://localhost:8191/v1 \
+            -H "Content-Type: application/json" \
+            -d '{"cmd":"request.get","url":"https://streamingnow.mov/","maxTimeout":60000}' \
+            | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          print('status:', d.get('status'))
+          sol = d.get('solution', {})
+          cookies = [c['name'] for c in sol.get('cookies', [])]
+          print('cookies:', cookies)
+          print('ua:', sol.get('userAgent','')[:80])
+          print('html_len:', len(sol.get('response','')))
+          has_cf = any(c == 'cf_clearance' for c in cookies)
+          print('cf_clearance found:', has_cf)
+          "
+
+      - name: Run scraper (FlareSolverr)
         if: ${{ inputs.cf_clearance == '' }}
         run: |
           python streamingnow_scraper.py \
             "${{ inputs.play_url }}" \
             --flaresolverr http://localhost:8191 \
-            --json > results.json
-          cat results.json
+            --json 2>&1 | tee scrape_output.txt
+          # split json from log
+          python3 -c "
+          with open('scrape_output.txt') as f:
+              lines = f.readlines()
+          # find first { line
+          start = next((i for i,l in enumerate(lines) if l.strip().startswith('{')), None)
+          if start is not None:
+              with open('results.json','w') as f:
+                  f.writelines(lines[start:])
+              print('results.json written')
+          else:
+              print('No JSON found in output')
+              exit(1)
+          "
 
-      - name: Run scraper (with cf_clearance)
+      - name: Run scraper (cf_clearance)
         if: ${{ inputs.cf_clearance != '' }}
         run: |
           python streamingnow_scraper.py \
             "${{ inputs.play_url }}" \
             --cf "${{ inputs.cf_clearance }}" \
-            --json > results.json
-          cat results.json
+            --json 2>&1 | tee scrape_output.txt
+          python3 -c "
+          with open('scrape_output.txt') as f:
+              lines = f.readlines()
+          start = next((i for i,l in enumerate(lines) if l.strip().startswith('{')), None)
+          if start is not None:
+              with open('results.json','w') as f:
+                  f.writelines(lines[start:])
+          else:
+              print('No JSON found'); exit(1)
+          "
 
       - name: Print summary
         run: |
-          python - << 'EOF'
-          import json, sys
+          python3 - << 'PYEOF'
+          import json
           with open("results.json") as f:
               r = json.load(f)
-          print(f"\nServers: {len(r['servers'])}")
+          print(f"Servers: {len(r['servers'])}")
           print(f"M3U8:    {len(r['m3u8_urls'])}")
           print(f"Iframes: {len(r['iframe_urls'])}")
           print(f"MP4:     {len(r['mp4_urls'])}")
-          print("\n── M3U8 URLs ──")
+          print("\n── M3U8 ──")
           for u in r["m3u8_urls"]: print(u)
-          print("\n── Iframe URLs ──")
+          print("\n── Iframes ──")
           for e in r["iframe_urls"]: print(f"[{e['server_id']}] {e['quality']} -> {e['url']}")
-          print("\n── MP4 URLs ──")
+          print("\n── MP4 ──")
           for u in r["mp4_urls"]: print(u)
-          EOF
+          PYEOF
 
       - name: Upload results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: scrape-results
-          path: results.json
+          path: |
+            results.json
+            scrape_output.txt
           retention-days: 7
 
-      - name: Save to repo (optional)
+      - name: Save to repo
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           mkdir -p scrape_output
           cp results.json scrape_output/latest.json
           git add scrape_output/latest.json
-          git diff --cached --quiet || git commit -m "scrape results $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git diff --cached --quiet || git commit -m "scrape $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push
-        continue-on-error: true  # don't fail if nothing changed
+        continue-on-error: true
