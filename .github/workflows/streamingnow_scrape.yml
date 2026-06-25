@@ -1,0 +1,102 @@
+name: streamingnow scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      play_url:
+        description: "Full streamingnow.mov ?play= URL"
+        required: true
+        default: "https://streamingnow.mov/?play=SW1PWFRUbUcxTWdmNHIvT1RGb0tTaXFRVStiR3NRdkZNcWlrOWtVc2ljYU5nQ1JPeDJwbmhFeTN3VHE3Q0drOGFiSUs0ZU9LUEo1TE9XcEhUTHJLOUt0cGc0aXZvTGhDUDhRV1IyMGR3Qnl4d0YyNERsQWRhOXBvK2tQanNvODBzc3FOQnVDRjl2UUJDVjJURjFqNjNER20="
+      cf_clearance:
+        description: "cf_clearance cookie (from browser, leave blank to use FlareSolverr)"
+        required: false
+        default: ""
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install curl_cffi requests
+
+      - name: Start FlareSolverr (if no cf_clearance provided)
+        if: ${{ inputs.cf_clearance == '' }}
+        run: |
+          docker pull ghcr.io/flaresolverr/flaresolverr:latest
+          docker run -d \
+            --name flaresolverr \
+            -p 8191:8191 \
+            -e LOG_LEVEL=info \
+            ghcr.io/flaresolverr/flaresolverr:latest
+          echo "Waiting for FlareSolverr to be ready..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8191/health > /dev/null 2>&1; then
+              echo "FlareSolverr ready"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Run scraper (with FlareSolverr)
+        if: ${{ inputs.cf_clearance == '' }}
+        run: |
+          python streamingnow_scraper.py \
+            "${{ inputs.play_url }}" \
+            --flaresolverr http://localhost:8191 \
+            --json > results.json
+          cat results.json
+
+      - name: Run scraper (with cf_clearance)
+        if: ${{ inputs.cf_clearance != '' }}
+        run: |
+          python streamingnow_scraper.py \
+            "${{ inputs.play_url }}" \
+            --cf "${{ inputs.cf_clearance }}" \
+            --json > results.json
+          cat results.json
+
+      - name: Print summary
+        run: |
+          python - << 'EOF'
+          import json, sys
+          with open("results.json") as f:
+              r = json.load(f)
+          print(f"\nServers: {len(r['servers'])}")
+          print(f"M3U8:    {len(r['m3u8_urls'])}")
+          print(f"Iframes: {len(r['iframe_urls'])}")
+          print(f"MP4:     {len(r['mp4_urls'])}")
+          print("\n── M3U8 URLs ──")
+          for u in r["m3u8_urls"]: print(u)
+          print("\n── Iframe URLs ──")
+          for e in r["iframe_urls"]: print(f"[{e['server_id']}] {e['quality']} -> {e['url']}")
+          print("\n── MP4 URLs ──")
+          for u in r["mp4_urls"]: print(u)
+          EOF
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrape-results
+          path: results.json
+          retention-days: 7
+
+      - name: Save to repo (optional)
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          mkdir -p scrape_output
+          cp results.json scrape_output/latest.json
+          git add scrape_output/latest.json
+          git diff --cached --quiet || git commit -m "scrape results $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push
+        continue-on-error: true  # don't fail if nothing changed
