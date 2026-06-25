@@ -17,6 +17,9 @@ import urllib.request
 from urllib.parse import urlparse, parse_qs, urlencode, urljoin
 from curl_cffi import requests as cffi_requests
 
+import sys as _sys
+def eprint(*a, **k): print(*a, file=_sys.stderr, **k)
+
 BASE_URL = "https://streamingnow.mov"
 ORIGIN   = "https://streamingnow.mov"
 UA       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -57,10 +60,10 @@ def flaresolverr_get(url, fs_url="http://localhost:8191"):
     ua        = solution.get("userAgent", UA)
     cookies   = {c["name"]: c["value"] for c in solution.get("cookies", [])}
 
-    print(f"[+] FlareSolverr UA: {ua[:80]}")
-    print(f"[+] FlareSolverr cookies: {list(cookies.keys())}")
+    eprint(f"[+] FlareSolverr UA: {ua[:80]}")
+    eprint(f"[+] FlareSolverr cookies: {list(cookies.keys())}")
     cf_val = cookies.get("cf_clearance", "")
-    print(f"[+] cf_clearance: {'OK (' + cf_val[:20] + '...)' if cf_val else 'NOT FOUND'}")
+    eprint(f"[+] cf_clearance: {'OK (' + cf_val[:20] + '...)' if cf_val else 'NOT FOUND'}")
 
     return html, cookies, ua
 
@@ -126,7 +129,7 @@ def parse_servers_and_token(html, url):
     if m:
         try:
             servers = json.loads(m.group(1))
-            print(f"[+] {len(servers)} servers via JS var")
+            eprint(f"[+] {len(servers)} servers via JS var")
         except Exception:
             pass
 
@@ -138,7 +141,7 @@ def parse_servers_and_token(html, url):
             servers.append({"video_id": v, "server_id": s,
                             "quality": quals[i] if i < len(quals) else "?"})
         if servers:
-            print(f"[+] {len(servers)} servers via regex")
+            eprint(f"[+] {len(servers)} servers via regex")
 
     qs         = parse_qs(urlparse(url).query)
     play_token = qs.get("play", [""])[0]
@@ -167,21 +170,21 @@ def extract_vfx_token(html, server_id):
 
 def post_response_php(session, ua, url, token):
     ep = f"{BASE_URL}/response.php"
-    print(f"[*] POST {ep}")
+    eprint(f"[*] POST {ep}")
     r = session.post(ep, data={"token": token}, headers=xhr_headers(ua, url), timeout=30)
-    print(f"    {r.status_code}  {r.text[:120]}")
+    eprint(f"    {r.status_code}  {r.text[:120]}")
     return r.text
 
 def fetch_playvideo(session, ua, video_id, server_id, token, main_url, init=0):
     params = {"video_id": video_id, "server_id": server_id, "token": token, "init": str(init)}
     pv_url = f"{BASE_URL}/playvideo.php?" + urlencode(params)
-    print(f"  [*] playvideo server={server_id} init={init}")
+    eprint(f"  [*] playvideo server={server_id} init={init}")
     r = session.get(pv_url, headers=iframe_headers(ua, main_url), timeout=30, allow_redirects=True)
     return pv_url, r.text, r.status_code
 
 def fetch_vipstream(session, ua, server_id, vfx_token, pv_url):
     url = f"{BASE_URL}/vipstream_vfx.php?s={server_id}&token={vfx_token}"
-    print(f"  [*] vipstream_vfx server={server_id}")
+    eprint(f"  [*] vipstream_vfx server={server_id}")
     r = session.get(url, headers=iframe_headers(ua, pv_url), timeout=30)
     return url, r.text
 
@@ -189,7 +192,7 @@ def extract_from_embed(ua, embed_url):
     results = {"m3u8": [], "mp4": []}
     parsed  = urlparse(embed_url)
     domain  = parsed.netloc
-    print(f"    [~] embed: {embed_url}")
+    eprint(f"    [~] embed: {embed_url}")
     ext_h = {
         "user-agent": ua,
         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -219,7 +222,7 @@ def extract_from_embed(ua, embed_url):
             results["m3u8"].extend(extract_m3u8(dr.text))
             results["mp4"].extend(extract_mp4(dr.text))
     except Exception as e:
-        print(f"    [!] {e}")
+        eprint(f"    [!] {e}")
     return results
 
 # ── Main ───────────────────────────────────────────────────────────────────────
@@ -232,33 +235,33 @@ def scrape(url, cookies_dict, ua):
     prefetched_html = cookies_dict.pop("_html", None)
 
     if prefetched_html:
-        print(f"[+] Using HTML from FlareSolverr ({len(prefetched_html)} chars)")
+        eprint(f"[+] Using HTML from FlareSolverr ({len(prefetched_html)} chars)")
         html = prefetched_html
         if "challenges.cloudflare.com/turnstile" in html and "video_id" not in html:
-            print("[!] FlareSolverr returned challenge page — Turnstile not solved")
+            eprint("[!] FlareSolverr returned challenge page — Turnstile not solved")
             sys.exit(1)
     else:
-        print(f"[*] GET {url}")
+        eprint(f"[*] GET {url}")
         r = session.get(url, headers=nav_headers(ua), timeout=30)
         if r.status_code == 403:
-            print(f"[!] 403 — cf_clearance rejected. Get a fresh one from browser.")
+            eprint(f"[!] 403 — cf_clearance rejected. Get a fresh one from browser.")
             sys.exit(1)
         r.raise_for_status()
         html = r.text
         if "challenges.cloudflare.com/turnstile" in html and "video_id" not in html:
-            print("[!] Got Turnstile page — pass --cf or --flaresolverr")
+            eprint("[!] Got Turnstile page — pass --cf or --flaresolverr")
             sys.exit(1)
 
     servers, play_token, full_token = parse_servers_and_token(html, url)
 
     if not servers:
-        print("[!] No servers found. HTML snippet:")
-        print(html[:2000])
+        eprint("[!] No servers found. HTML snippet:")
+        eprint(html[:2000])
         sys.exit(1)
 
-    print(f"\n[+] {len(servers)} servers:")
+    eprint(f"\n[+] {len(servers)} servers:")
     for s in servers:
-        print(f"    [{s['server_id']}] {s.get('quality','?')}  {s['video_id'][:28]}...")
+        eprint(f"    [{s['server_id']}] {s.get('quality','?')}  {s['video_id'][:28]}...")
     results["servers"] = servers
 
     if full_token:
@@ -266,19 +269,19 @@ def scrape(url, cookies_dict, ua):
         time.sleep(0.5)
 
     seen_iframes = set()
-    print()
+    eprint()
 
     for srv in servers:
         vid  = srv["video_id"]
         sid  = srv["server_id"]
         qual = srv.get("quality", "?")
-        print(f"── Server {sid} ({qual}) ──")
+        eprint(f"── Server {sid} ({qual}) ──")
 
         for init in [1, 0]:
             pv_url, pv_html, status = fetch_playvideo(session, ua, vid, sid, full_token, url, init)
             time.sleep(0.3)
             if status != 200:
-                print(f"  [!] status={status}")
+                eprint(f"  [!] status={status}")
                 continue
 
             vfx_token = extract_vfx_token(pv_html, sid)
@@ -287,7 +290,7 @@ def scrape(url, cookies_dict, ua):
                 for m in extract_m3u8(vfx_html):
                     if m not in results["m3u8_urls"]:
                         results["m3u8_urls"].append(m)
-                        print(f"  [m3u8/vfx] {m}")
+                        eprint(f"  [m3u8/vfx] {m}")
 
             for m in extract_m3u8(pv_html):
                 if m not in results["m3u8_urls"]:
@@ -304,7 +307,7 @@ def scrape(url, cookies_dict, ua):
                     continue
                 seen_iframes.add(ifr)
                 results["iframe_urls"].append({"server_id": sid, "quality": qual, "url": ifr})
-                print(f"  [iframe] {ifr}")
+                eprint(f"  [iframe] {ifr}")
                 if "streamingnow.mov" not in ifr:
                     ed = extract_from_embed(ua, ifr)
                     for m in ed["m3u8"]:
@@ -345,7 +348,7 @@ def main():
     ua = UA
 
     if args.flaresolverr:
-        print(f"[*] FlareSolverr: {args.flaresolverr}")
+        eprint(f"[*] FlareSolverr: {args.flaresolverr}")
         html, cookies_dict, ua = flaresolverr_get(args.url or DEFAULT_URL, args.flaresolverr)
         cookies_dict["_html"] = html  # pass prefetched HTML to scrape()
 
@@ -358,17 +361,17 @@ def main():
         for c in jar:
             if "streamingnow" in c.domain:
                 cookies_dict[c.name] = c.value
-                print(f"[+] Cookie: {c.name}")
+                eprint(f"[+] Cookie: {c.name}")
 
     else:
-        print("[!] No auth provided. Pass --cf, --flaresolverr, or --cookies.")
-        print("    Example: python streamingnow_scraper.py --flaresolverr http://localhost:8191")
+        eprint("[!] No auth provided. Pass --cf, --flaresolverr, or --cookies.")
+        eprint("    Example: python streamingnow_scraper.py --flaresolverr http://localhost:8191")
         sys.exit(1)
 
     results = scrape(args.url or DEFAULT_URL, cookies_dict, ua)
 
     if args.json:
-        print(json.dumps(results, indent=2))
+        eprint(json.dumps(results, indent=2))
     else:
         print_summary(results)
 
